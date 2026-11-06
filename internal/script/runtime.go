@@ -167,6 +167,7 @@ func (r *Runner) Run(ctx context.Context, src string, env Env) *Result {
 		"json": json.Module,
 		"math": math.Module,
 		"time": startime.Module,
+		"sum":  starlark.NewBuiltin("sum", builtinSum),
 	}
 	res := &Result{}
 	err := st.exec(src, predeclared)
@@ -279,4 +280,24 @@ func (o *outputBuffer) String() string {
 		return o.b.String()
 	}
 	return o.b.String() + fmt.Sprintf("\n[output truncated: the script produced %d bytes, the limit is %d. Print less: select fields, aggregate, or slice lists.]\n", o.total, o.max)
+}
+
+// builtinSum is Python's sum(iterable, start=0), which Starlark lacks.
+func builtinSum(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var it starlark.Iterable
+	var acc starlark.Value = starlark.MakeInt(0)
+	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "iterable", &it, "start?", &acc); err != nil {
+		return nil, err
+	}
+	iter := it.Iterate()
+	defer iter.Done()
+	var x starlark.Value
+	for iter.Next(&x) {
+		v, err := starlark.Binary(syntax.PLUS, acc, x)
+		if err != nil {
+			return nil, fmt.Errorf("sum: %v", err)
+		}
+		acc = v
+	}
+	return acc, nil
 }

@@ -126,6 +126,8 @@ func TestFinalValue(t *testing.T) {
 		`{"k": [1, (2, 3)]}`:             "{\"k\":[1,[2,3]]}\n",
 		"def f():\n  pass\nf":            "<function f>\n",
 		"for i in range(2):\n  print(i)": "0\n1\n",
+		"sum([1, 2, 3])":                 "6\n",
+		"sum([0.5, 1], 1)":               "2.5\n",
 	}
 	for src, want := range cases {
 		res := runScript(t, &recorder{}, Limits{}, src)
