@@ -298,3 +298,42 @@ func TestStdio(t *testing.T) {
 		t.Fatalf("result = %+v", res.Content[0])
 	}
 }
+
+// TestReadmeExamples runs the Python blocks of README.md against canned data.
+func TestReadmeExamples(t *testing.T) {
+	b, err := os.ReadFile("../../README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocks := strings.Split(string(b), "```python\n")[1:]
+	if len(blocks) < 4 {
+		t.Fatalf("%d python blocks", len(blocks))
+	}
+	replies := map[string]string{
+		"describe_instances": `{"Reservations":[{"Instances":[{"InstanceId":"i-1","InstanceType":"t3.micro"}]}]}`,
+		"describe_regions":   `{"Regions":[{"RegionName":"us-east-1"},{"RegionName":"ap-northeast-1"}]}`,
+		"list_users":         `{"Users":[{"UserName":"alice"},{"UserName":"bob"}],"IsTruncated":false}`,
+		"get_object":         `{"Body":"{}","ContentType":"application/json"}`,
+	}
+	backend := caller.Func(func(ctx context.Context, req *caller.Request) (json.RawMessage, error) {
+		if req.Operation == "list_mfa_devices" {
+			if strings.Contains(string(req.Params), "alice") {
+				return json.RawMessage(`{"MFADevices":[{"SerialNumber":"x"}]}`), nil
+			}
+			return json.RawMessage(`{"MFADevices":[]}`), nil
+		}
+		if r, ok := replies[req.Operation]; ok {
+			return json.RawMessage(r), nil
+		}
+		return nil, &caller.APIError{Code: "Unexpected", Message: req.Operation}
+	})
+	want := []string{`[["i-1","t3.micro"]]`, `{"us-east-1":1,"ap-northeast-1":1}`, `["bob"]`, `{}`}
+	r := &script.Runner{Caller: backend}
+	for i, blk := range blocks[:4] {
+		src := blk[:strings.Index(blk, "```")]
+		res := r.Run(context.Background(), src, script.Env{})
+		if res.Err != nil || strings.TrimSpace(res.Output) != want[i] {
+			t.Errorf("README example %d: %q, %v\n%s", i+1, res.Output, res.Err, src)
+		}
+	}
+}
