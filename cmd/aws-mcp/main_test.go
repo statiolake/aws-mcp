@@ -40,11 +40,11 @@ func testConfig(t *testing.T, args ...string) *Config {
 
 func TestParseConfig(t *testing.T) {
 	cfg := testConfig(t)
-	if !cfg.ReadOnly || !cfg.RDS || cfg.AWSCLI != "aws" || cfg.Limits.MaxCalls != script.DefaultLimits.MaxCalls {
+	if !cfg.ReadOnly || cfg.AWSCLI != "aws" || cfg.Limits.MaxCalls != script.DefaultLimits.MaxCalls {
 		t.Fatalf("defaults = %+v", cfg)
 	}
-	cfg = testConfig(t, "--allow-writes", "--no-rds", "--region", "eu-west-1", "--max-calls", "7", "--script-timeout", "5s")
-	if cfg.ReadOnly || cfg.RDS || cfg.Region != "eu-west-1" || cfg.Limits.MaxCalls != 7 || cfg.Limits.Timeout != 5*time.Second {
+	cfg = testConfig(t, "--allow-writes", "--region", "eu-west-1", "--max-calls", "7", "--script-timeout", "5s")
+	if cfg.ReadOnly || cfg.Region != "eu-west-1" || cfg.Limits.MaxCalls != 7 || cfg.Limits.Timeout != 5*time.Second {
 		t.Fatalf("flags = %+v", cfg)
 	}
 	env := map[string]string{"AWS_MCP_READ_ONLY": "false", "AWS_MCP_PROFILE": "dev", "AWS_MCP_AWS_CLI": "/opt/aws"}
@@ -96,11 +96,6 @@ var fakeRules = []fakeaws.Rule{
 	{Service: "sts", Operation: "get-caller-identity", Stdout: map[string]any{"Account": "123456789012", "Arn": "arn:aws:iam::123456789012:user/me"}},
 	{Service: "ec2", Operation: "describe-regions", Echo: true},
 	{Service: "ec2", Operation: "terminate-instances", Stdout: map[string]any{"TerminatingInstances": []any{}}},
-	{Service: "rds-data", Operation: "begin-transaction", Stdout: map[string]any{"transactionId": "tx"}},
-	{Service: "rds-data", Operation: "execute-statement", Match: map[string]any{"sql": "SET TRANSACTION READ ONLY"}, Stdout: map[string]any{}},
-	{Service: "rds-data", Operation: "execute-statement", Stdout: map[string]any{
-		"columnMetadata": []any{map[string]any{"label": "one", "typeName": "int4"}}, "formattedRecords": `[{"one":1}]`}},
-	{Service: "rds-data", Operation: "rollback-transaction", Stdout: map[string]any{"transactionStatus": "Rollback Complete"}},
 }
 
 func fakeServer(t *testing.T, args ...string) (*mcp.ClientSession, *fakeaws.Fake) {
@@ -121,7 +116,7 @@ func TestListTools(t *testing.T) {
 	for _, tl := range res.Tools {
 		names[tl.Name] = tl
 	}
-	for _, n := range []string{"run_script", "call_aws", "rds_query"} {
+	for _, n := range []string{"run_script", "call_aws"} {
 		if names[n] == nil {
 			t.Fatalf("tool %s missing; have %v", n, names)
 		}
@@ -132,19 +127,19 @@ func TestListTools(t *testing.T) {
 			t.Errorf("run_script description lacks %q", s)
 		}
 	}
-	rd := names["rds_query"].Description
-	if !strings.Contains(rd, "rolled back") || !strings.Contains(rd, "single read statement") {
-		t.Errorf("rds_query description lacks the protections")
-	}
 	if !names["call_aws"].Annotations.ReadOnlyHint {
 		t.Error("call_aws not annotated read-only")
 	}
 
-	cs, _ = fakeServer(t, "--no-rds", "--allow-writes")
-	res, _ = cs.ListTools(context.Background(), nil)
 	if len(res.Tools) != 2 {
-		t.Fatalf("--no-rds: %d tools", len(res.Tools))
+		t.Fatalf("%d tools", len(res.Tools))
 	}
+	if _, _, err := parseConfig([]string{"--no-rds"}, func(string) string { return "" }, io.Discard); err == nil {
+		t.Fatal("--no-rds still accepted")
+	}
+
+	cs, _ = fakeServer(t, "--allow-writes")
+	res, _ = cs.ListTools(context.Background(), nil)
 	for _, tl := range res.Tools {
 		if strings.Contains(tl.Description, "read-only mode") || tl.Annotations.ReadOnlyHint {
 			t.Errorf("%s still claims read-only", tl.Name)
@@ -215,27 +210,6 @@ func TestCallAWSTool(t *testing.T) {
 	}
 }
 
-func TestRDSQueryTool(t *testing.T) {
-	cs, f := fakeServer(t)
-	args := map[string]any{"resource_arn": "arn:aws:rds:us-east-1:1:cluster:c", "secret_arn": "arn:aws:secretsmanager:us-east-1:1:secret:ro",
-		"database": "app", "sql": "SELECT 1 AS one"}
-	out, isErr := callTool(t, cs, "rds_query", args)
-	if isErr || !strings.Contains(out, `"records":[{"one":1}]`) || !strings.Contains(out, `"rolledBack":true`) {
-		t.Fatalf("out = %q", out)
-	}
-	if inv := f.Invocations(); len(inv) != 4 || inv[3].Operation != "rollback-transaction" {
-		t.Fatalf("invocations = %+v", inv)
-	}
-	args["sql"] = "DELETE FROM users"
-	out, isErr = callTool(t, cs, "rds_query", args)
-	if !isErr || !strings.Contains(out, "refused") {
-		t.Fatalf("out = %q", out)
-	}
-	if len(f.Invocations()) != 4 {
-		t.Fatal("refused SQL reached the CLI")
-	}
-}
-
 // TestDescriptionExamples runs the examples from the run_script description.
 func TestDescriptionExamples(t *testing.T) {
 	desc := runScriptDescription(testConfig(t))
@@ -275,7 +249,7 @@ func TestDescriptionExamples(t *testing.T) {
 func TestStdio(t *testing.T) {
 	f := fakeaws.New(t, fakeRules)
 	cmd := exec.Command(os.Args[0])
-	cmd.Env = append(os.Environ(), "AWS_MCP_TEST_SERVE=1", "AWS_MCP_TEST_ARGS=--aws-cli "+f.Path+" --no-rds")
+	cmd.Env = append(os.Environ(), "AWS_MCP_TEST_SERVE=1", "AWS_MCP_TEST_ARGS=--aws-cli "+f.Path)
 	cmd.Env = append(cmd.Env, f.Env[1:]...) // rules and log; FAKE_AWS=1 is set by the server for its children
 	cmd.Stderr = os.Stderr
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

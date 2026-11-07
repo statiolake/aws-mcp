@@ -9,10 +9,11 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"runtime/debug"
 	"syscall"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/statiolake/aws-mcp/internal/mcpx"
 )
 
 var version = "dev"
@@ -44,12 +45,4 @@ func realMain(args []string) int {
 	return 0
 }
 
-func buildVersion() string {
-	if version != "dev" {
-		return version
-	}
-	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
-		return bi.Main.Version
-	}
-	return version
-}
+func buildVersion() string { return mcpx.BuildVersion(version) }

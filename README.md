@@ -1,7 +1,12 @@
 # aws-mcp
 
-A small MCP server that lets LLM agents call **any AWS API** — one call at a
-time, or from a sandboxed, Python-like script with a boto3-style client.
+Small MCP servers that let LLM agents work with AWS:
+
+- **`aws-mcp`** calls **any AWS API** — one call at a time, or from a
+  sandboxed, Python-like script with a boto3-style client.
+- **`aws-rds-mcp`** runs read-only SQL on Aurora / RDS through the RDS Data
+  API. It is a separate binary so you can give an agent database access
+  independently of general AWS API access (or not at all).
 
 It is a lightweight alternative to the Python AWS API MCP server from awslabs,
 which uses around 700 MB per process. `aws-mcp` is a single static Go binary
@@ -53,6 +58,7 @@ fetches the right toolchain automatically).
 
 ```sh
 CGO_ENABLED=0 go install github.com/statiolake/aws-mcp/cmd/aws-mcp@latest
+CGO_ENABLED=0 go install github.com/statiolake/aws-mcp/cmd/aws-rds-mcp@latest   # optional
 ```
 
 `CGO_ENABLED=0` produces a fully static binary; without it the binary links
@@ -66,6 +72,9 @@ libc dynamically on Linux, which also works.
 claude mcp add aws -- aws-mcp --region ap-northeast-1
 # with a profile, shared with the project via .mcp.json:
 claude mcp add --scope project aws -e AWS_PROFILE=dev -- aws-mcp --region ap-northeast-1
+# the RDS Data API server, ideally with a profile that may only use rds-data
+# and read the database user's secret:
+claude mcp add aws-rds -e AWS_PROFILE=db-readonly -- aws-rds-mcp --region ap-northeast-1
 ```
 
 or write `.mcp.json` yourself:
@@ -78,6 +87,12 @@ or write `.mcp.json` yourself:
       "command": "aws-mcp",
       "args": ["--region", "ap-northeast-1"],
       "env": { "AWS_PROFILE": "dev" }
+    },
+    "aws-rds": {
+      "type": "stdio",
+      "command": "aws-rds-mcp",
+      "args": ["--region", "ap-northeast-1"],
+      "env": { "AWS_PROFILE": "db-readonly" }
     }
   }
 }
@@ -92,9 +107,14 @@ or write `.mcp.json` yourself:
 command = "aws-mcp"
 args = ["--region", "ap-northeast-1"]
 env = { AWS_PROFILE = "dev" }
+
+[mcp_servers.aws-rds]
+command = "aws-rds-mcp"
+args = ["--region", "ap-northeast-1"]
+env = { AWS_PROFILE = "db-readonly" }
 ```
 
-## Tools
+## Tools of `aws-mcp`
 
 ### `run_script(script, region?, profile?)`
 
@@ -125,23 +145,6 @@ One call, JSON in and out:
 `{"service": "ec2", "operation": "DescribeVpcs", "params": {"VpcIds": ["vpc-1"]}}`.
 Returns a single page.
 
-### `rds_query(resource_arn, secret_arn, database, sql, parameters?, region?, profile?)`
-
-Read-only SQL on Aurora / RDS through the
-[RDS Data API](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/data-api.html),
-authenticating with the Secrets Manager secret you pass — intended for a
-read-only database user's secret. Two protections:
-
-1. Only a single read statement (`SELECT`, `WITH`, `SHOW`, `EXPLAIN`,
-   `DESCRIBE`) without write keywords is accepted; the check skips literals and
-   comments and is applied with both standard and backslash string escaping.
-2. The statement runs inside a Data API transaction (made `READ ONLY` where
-   the engine supports it, i.e. PostgreSQL) that is **always rolled back**.
-
-`parameters` fills `:name` placeholders: `{"id": 42}`. The result is
-`{"columns", "records", "numberOfRecords", "rolledBack"}`. Disable the tool
-with `--no-rds`.
-
 ## Read-only mode
 
 On by default. `run_script` and `call_aws` only run operations whose name
@@ -159,7 +162,7 @@ operations. Read-only mode is a guard against mistakes, not a security
 boundary: `Get*` includes things like `secretsmanager GetSecretValue`. Use IAM
 (a read-only role or profile) for real enforcement.
 
-## Configuration
+## Configuration of `aws-mcp`
 
 Every flag has an environment variable default.
 
@@ -169,7 +172,6 @@ Every flag has an environment variable default.
 | `--profile` | `AWS_MCP_PROFILE` | CLI's own | default profile |
 | `--aws-cli` | `AWS_MCP_AWS_CLI` | `aws` | path to the AWS CLI v2 |
 | `--read-only` / `--allow-writes` | `AWS_MCP_READ_ONLY` / `AWS_MCP_ALLOW_WRITES` | read-only | |
-| `--no-rds` | `AWS_MCP_NO_RDS` | off | drop `rds_query` |
 | `--call-timeout` | `AWS_MCP_CALL_TIMEOUT` | `1m` | per AWS call |
 | `--script-timeout` | `AWS_MCP_SCRIPT_TIMEOUT` | `2m` | per script |
 | `--max-steps` | `AWS_MCP_MAX_STEPS` | 10000000 | Starlark steps per script |
@@ -181,6 +183,26 @@ Every flag has an environment variable default.
 
 Region and profile resolve as: per-client argument > tool argument > server
 flag > the CLI's own resolution (`AWS_REGION`, `AWS_PROFILE`, config files).
+
+## `aws-rds-mcp`: `rds_query(resource_arn, secret_arn, database, sql, parameters?, region?, profile?)`
+
+Read-only SQL on Aurora / RDS through the
+[RDS Data API](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/data-api.html),
+authenticating with the Secrets Manager secret you pass — intended for a
+read-only database user's secret. Two protections:
+
+1. Only a single read statement (`SELECT`, `WITH`, `SHOW`, `EXPLAIN`,
+   `DESCRIBE`) without write keywords is accepted; the check skips literals and
+   comments and is applied with both standard and backslash string escaping.
+2. The statement runs inside a Data API transaction (made `READ ONLY` where
+   the engine supports it, i.e. PostgreSQL) that is **always rolled back**.
+
+`parameters` fills `:name` placeholders: `{"id": 42}`. The result is
+`{"columns", "records", "numberOfRecords", "rolledBack"}`.
+
+Flags (environment defaults use the `AWS_RDS_MCP_` prefix): `--region`,
+`--profile`, `--aws-cli`, `--call-timeout` (default `1m`), `--max-output`
+(default 100000 bytes).
 
 ## Examples
 
@@ -232,7 +254,9 @@ Tests never touch AWS: the test binary doubles as a fake `aws` executable
 Layout:
 
 ```
-cmd/aws-mcp/        server, flags, tool definitions
+cmd/aws-mcp/        AWS API server: flags, tool definitions
+cmd/aws-rds-mcp/    RDS Data API server (rds_query)
+internal/mcpx/      helpers shared by both commands
 internal/caller/    Caller interface + AWS CLI backend
 internal/script/    Starlark runtime and the aws module
 internal/readonly/  read-only classifier and Caller guard

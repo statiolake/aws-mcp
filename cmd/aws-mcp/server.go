@@ -3,14 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/statiolake/aws-mcp/internal/caller"
-	"github.com/statiolake/aws-mcp/internal/rdsdata"
+	"github.com/statiolake/aws-mcp/internal/mcpx"
 	"github.com/statiolake/aws-mcp/internal/readonly"
 	"github.com/statiolake/aws-mcp/internal/script"
 )
@@ -31,17 +30,6 @@ type CallAWSInput struct {
 	Profile   string         `json:"profile,omitempty" jsonschema:"AWS profile override"`
 }
 
-// RDSQueryInput is the input of rds_query.
-type RDSQueryInput struct {
-	ResourceARN string `json:"resource_arn" jsonschema:"ARN of the Aurora/RDS cluster (Data API must be enabled)"`
-	SecretARN   string `json:"secret_arn" jsonschema:"ARN of the Secrets Manager secret of a (read-only) database user"`
-	Database    string `json:"database" jsonschema:"database name"`
-	SQL         string `json:"sql" jsonschema:"one read statement: SELECT, WITH, SHOW, EXPLAIN or DESCRIBE; use :name placeholders"`
-	Parameters  any    `json:"parameters,omitempty" jsonschema:"values for :name placeholders as {name: value}, or a raw Data API parameter list"`
-	Region      string `json:"region,omitempty" jsonschema:"region override"`
-	Profile     string `json:"profile,omitempty" jsonschema:"AWS profile override"`
-}
-
 func newServer(cfg *Config, backend caller.Caller) *mcp.Server {
 	if backend == nil {
 		backend = caller.NewCLI(caller.CLI{
@@ -58,7 +46,6 @@ func newServer(cfg *Config, backend caller.Caller) *mcp.Server {
 	})
 	runner := &script.Runner{Caller: api, Limits: cfg.Limits}
 	openWorld := true
-	notDestructive := false
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "run_script",
@@ -94,58 +81,14 @@ func newServer(cfg *Config, backend caller.Caller) *mcp.Server {
 		return textResult(limitText(string(out), cfg.Limits.MaxOutputBytes), false), nil, nil
 	})
 
-	if cfg.RDS {
-		rds := &rdsdata.Runner{Caller: backend, SetReadOnlyTxn: true}
-		mcp.AddTool(srv, &mcp.Tool{
-			Name:        "rds_query",
-			Title:       "Read-only SQL via the RDS Data API",
-			Description: rdsQueryDescription,
-			Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, DestructiveHint: &notDestructive, OpenWorldHint: &openWorld},
-		}, func(ctx context.Context, _ *mcp.CallToolRequest, in RDSQueryInput) (*mcp.CallToolResult, any, error) {
-			var params json.RawMessage
-			if in.Parameters != nil {
-				b, err := json.Marshal(in.Parameters)
-				if err != nil {
-					return textResult("Error: "+err.Error(), true), nil, nil
-				}
-				params = b
-			}
-			res, err := rds.Run(ctx, rdsdata.Query{
-				ResourceARN: in.ResourceARN, SecretARN: in.SecretARN, Database: in.Database,
-				SQL: in.SQL, Parameters: params, Region: in.Region, Profile: in.Profile,
-			})
-			if err != nil {
-				msg := errorText(err)
-				if res != nil && !res.RolledBack && res.RollbackError != "" {
-					msg += "\nRollback failed: " + res.RollbackError
-				}
-				return textResult(msg, true), nil, nil
-			}
-			b, _ := json.Marshal(res)
-			return textResult(limitText(string(b), cfg.Limits.MaxOutputBytes), false), nil, nil
-		})
-	}
 	return srv
 }
 
-func textResult(s string, isErr bool) *mcp.CallToolResult {
-	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: s}}, IsError: isErr}
-}
-
-func errorText(err error) string {
-	var ae *caller.APIError
-	if errors.As(err, &ae) {
-		return fmt.Sprintf("Error: %s (%s.%s): %s", ae.Code, ae.Service, ae.Operation, ae.Message)
-	}
-	return "Error: " + err.Error()
-}
-
-func limitText(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	return s[:max] + fmt.Sprintf("\n[output truncated: %d bytes, the limit is %d. Narrow the request (Filters, MaxResults) or use run_script to select fields.]", len(s), max)
-}
+var (
+	textResult = mcpx.TextResult
+	errorText  = mcpx.ErrorText
+	limitText  = mcpx.LimitText
+)
 
 func readOnlyNote(cfg *Config) string {
 	if !cfg.ReadOnly {
@@ -156,9 +99,6 @@ func readOnlyNote(cfg *Config) string {
 
 func serverInstructions(cfg *Config) string {
 	s := "Call AWS APIs. Prefer run_script for anything beyond a single call: it runs a boto3-like Starlark script so you can combine calls, paginate, run calls concurrently and return only what matters. Use call_aws for one simple call."
-	if cfg.RDS {
-		s += " Use rds_query for read-only SQL on Aurora/RDS through the Data API."
-	}
 	return s + " " + readOnlyNote(cfg)
 }
 
@@ -217,12 +157,3 @@ func callAWSDescription(cfg *Config) string {
 Returns a single page (no automatic pagination: pass the returned NextToken/Marker back yourself). For several calls, pagination, filtering or aggregation use run_script instead.
 ` + readOnlyNote(cfg)
 }
-
-const rdsQueryDescription = `Run one read-only SQL statement on an Aurora / RDS cluster through the RDS Data API (the Data API must be enabled on the cluster). It authenticates with the Secrets Manager secret you pass: use a read-only database user's secret.
-
-Two protections make it read-only:
-1. Only a single read statement is accepted: SELECT, WITH, SHOW, EXPLAIN or DESCRIBE, without write keywords (INSERT, UPDATE, DELETE, INTO, CREATE, DROP, ...) and without a second statement; anything else is refused before it reaches the database.
-2. The statement runs inside a Data API transaction that is always rolled back (and is set READ ONLY where the engine supports it), so nothing it does is ever committed.
-
-parameters: values for :name placeholders, e.g. sql "SELECT * FROM orders WHERE id = :id" with parameters {"id": 42}.
-Returns {"columns": [{"name", "typeName"}], "records": [{column: value}, ...], "numberOfRecords": n, "rolledBack": true}. Add LIMIT to large queries.`
