@@ -2,9 +2,8 @@
 // an implementation that shells out to the AWS CLI v2.
 //
 // Everything above this package (the Starlark runtime, the MCP tools) talks
-// only to the Caller interface, so the CLI backend can later be replaced by a
-// native SigV4 client without touching the scripting surface. See
-// docs/phase2.md.
+// only to the Caller interface, so the backend can be swapped (tests use
+// caller.Func) without touching the scripting surface.
 package caller
 
 import (

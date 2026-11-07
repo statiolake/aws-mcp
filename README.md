@@ -28,8 +28,6 @@ Calls go through the **AWS CLI v2** (`aws <service> <operation>
 --cli-input-json ...`). Every CLI operation accepts `--cli-input-json`, so every
 operation of every service is reachable, and credentials (profiles, SSO,
 environment, IMDS, ...) are resolved by the CLI exactly as on your terminal.
-The backend sits behind a Go interface so a native SigV4 client can replace
-it later ([phase 2](docs/phase2.md)).
 
 ## Footprint
 
@@ -211,7 +209,7 @@ Read a small object from S3 (streamed bodies are returned as `Body`):
 aws.client("s3").get_object(Bucket="my-bucket", Key="config.json")["Body"]
 ```
 
-## Limitations (phase 1)
+## Limitations
 
 - Each call costs one CLI start-up (~0.3–1 s); use `aws.batch` to overlap them.
 - `paginate` recognises continuation tokens by name (botocore's paginator
@@ -241,7 +239,6 @@ internal/readonly/  read-only classifier and Caller guard
 internal/rdsdata/   rds_query: SQL guard + rolled-back Data API transaction
 internal/awsname/   boto3 / API / CLI name conversion
 internal/fakeaws/   fake aws executable for tests
-docs/phase2.md      plan for the native backend
 ```
 
 ## License
