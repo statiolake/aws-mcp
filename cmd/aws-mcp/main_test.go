@@ -3,7 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"strings"
@@ -12,6 +15,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/statiolake/aws-mcp/internal/awsdocs"
 	"github.com/statiolake/aws-mcp/internal/caller"
 	"github.com/statiolake/aws-mcp/internal/fakeaws"
 	"github.com/statiolake/aws-mcp/internal/script"
@@ -103,7 +107,7 @@ func fakeServer(t *testing.T, args ...string) (*mcp.ClientSession, *fakeaws.Fake
 	f := fakeaws.New(t, fakeRules)
 	cfg := testConfig(t, args...)
 	backend := caller.NewCLI(caller.CLI{Path: f.Path, Env: f.Env, Region: cfg.Region, Timeout: 10 * time.Second})
-	return connect(t, newServer(cfg, backend)), f
+	return connect(t, newServer(cfg, backend, nil)), f
 }
 
 func TestListTools(t *testing.T) {
@@ -116,7 +120,7 @@ func TestListTools(t *testing.T) {
 	for _, tl := range res.Tools {
 		names[tl.Name] = tl
 	}
-	for _, n := range []string{"run_script", "call_aws", "describe_aws_operation"} {
+	for _, n := range []string{"run_script", "call_aws", "describe_aws_operation", "search_aws_docs", "read_aws_docs"} {
 		if names[n] == nil {
 			t.Fatalf("tool %s missing; have %v", n, names)
 		}
@@ -131,7 +135,7 @@ func TestListTools(t *testing.T) {
 		t.Error("call_aws not annotated read-only")
 	}
 
-	if len(res.Tools) != 3 {
+	if len(res.Tools) != 5 {
 		t.Fatalf("%d tools", len(res.Tools))
 	}
 	if _, _, err := parseConfig([]string{"--no-rds"}, func(string) string { return "" }, io.Discard); err == nil {
@@ -141,8 +145,8 @@ func TestListTools(t *testing.T) {
 	cs, _ = fakeServer(t, "--allow-writes")
 	res, _ = cs.ListTools(context.Background(), nil)
 	for _, tl := range res.Tools {
-		if tl.Name == "describe_aws_operation" {
-			continue // never calls AWS
+		if tl.Name != "run_script" && tl.Name != "call_aws" {
+			continue // the other tools never change anything
 		}
 		if strings.Contains(tl.Description, "read-only mode") || tl.Annotations.ReadOnlyHint {
 			t.Errorf("%s still claims read-only", tl.Name)
@@ -229,7 +233,7 @@ func TestUnknownServiceEndToEnd(t *testing.T) {
 		{Service: "quantum-ledger", Operation: "entangle-qubits", Stdout: map[string]any{"ProofId": "x"}},
 	})
 	cfg := testConfig(t)
-	cs := connect(t, newServer(cfg, caller.NewCLI(caller.CLI{Path: f.Path, Env: f.Env, Timeout: 10 * time.Second})))
+	cs := connect(t, newServer(cfg, caller.NewCLI(caller.CLI{Path: f.Path, Env: f.Env, Timeout: 10 * time.Second}), nil))
 
 	out, isErr := callTool(t, cs, "run_script", map[string]any{"script": `
 ql = aws.client("quantum-ledger", region="eu-north-1")
@@ -268,10 +272,57 @@ d = ql.describe_qubit_array(ArrayId="qa-1", IncludeCalibration=True)
 		t.Fatalf("invocations = %s", got)
 	}
 
-	cs = connect(t, newServer(testConfig(t, "--allow-writes"), caller.NewCLI(caller.CLI{Path: f.Path, Env: f.Env, Timeout: 10 * time.Second})))
+	cs = connect(t, newServer(testConfig(t, "--allow-writes"), caller.NewCLI(caller.CLI{Path: f.Path, Env: f.Env, Timeout: 10 * time.Second}), nil))
 	out, isErr = callTool(t, cs, "run_script", map[string]any{"script": `aws.client("quantum-ledger").entangle_qubits(Qubits=[1, 2])["ProofId"]`})
 	if isErr || out != "x\n" {
 		t.Fatalf("allow-writes = %q", out)
+	}
+}
+
+type fakeTransport struct{ h http.HandlerFunc }
+
+func (f fakeTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	rec := httptest.NewRecorder()
+	f.h(rec, r)
+	resp := rec.Result()
+	resp.Request = r
+	return resp, nil
+}
+
+func TestDocsTools(t *testing.T) {
+	long := strings.Repeat("<p>Lorem ipsum dolor sit amet.</p>\n", 400)
+	docs := awsdocs.New(awsdocs.Options{HTTP: &http.Client{Transport: fakeTransport{func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Host == "proxy.search.docs.aws.amazon.com":
+			io.WriteString(w, `{"suggestions":[{"textExcerptSuggestion":{"link":"https://docs.aws.amazon.com/w/latest/ug/what-is.html","title":"What is Widgets?","summary":"Widgets hold parts."}}]}`)
+		case r.URL.Path == "/w/latest/ug/what-is.html":
+			w.Header().Set("Content-Type", "text/html")
+			io.WriteString(w, `<html><head><title>What is Widgets?</title></head><body><nav>menu</nav><div id="main-col-body"><h1>What is Widgets?</h1>`+long+`</div></body></html>`)
+		default:
+			http.NotFound(w, r)
+		}
+	}}}})
+	cs := connect(t, newServer(testConfig(t), nil, docs))
+
+	out, isErr := callTool(t, cs, "search_aws_docs", map[string]any{"query": "widgets"})
+	if isErr || out != "1. What is Widgets?\n   https://docs.aws.amazon.com/w/latest/ug/what-is.html\n   Widgets hold parts.\n" {
+		t.Fatalf("search = %q", out)
+	}
+	out, isErr = callTool(t, cs, "read_aws_docs", map[string]any{"url": "https://docs.aws.amazon.com/w/latest/ug/what-is.html"})
+	if isErr || !strings.HasPrefix(out, "# What is Widgets?\n\nLorem ipsum") || strings.Contains(out, "menu") ||
+		!strings.Contains(out, "call read_aws_docs again with start_index=") {
+		t.Fatalf("read = %q", out)
+	}
+	i := strings.LastIndex(out, "start_index=")
+	var next int
+	fmt.Sscanf(out[i:], "start_index=%d", &next)
+	out, isErr = callTool(t, cs, "read_aws_docs", map[string]any{"url": "https://docs.aws.amazon.com/w/latest/ug/what-is.html", "start_index": next, "max_length": 100000})
+	if isErr || !strings.HasPrefix(out, "[https://docs.aws.amazon.com/w/latest/ug/what-is.html, from character") || strings.Contains(out, "continues") {
+		t.Fatalf("read on = %q", out[:200])
+	}
+	out, isErr = callTool(t, cs, "read_aws_docs", map[string]any{"url": "https://example.com/"})
+	if !isErr || !strings.Contains(out, "only https://docs.aws.amazon.com/") {
+		t.Fatalf("other host = %q", out)
 	}
 }
 
@@ -325,7 +376,7 @@ func TestStdio(t *testing.T) {
 	}
 	defer cs.Close()
 	tools, err := cs.ListTools(ctx, nil)
-	if err != nil || len(tools.Tools) != 3 {
+	if err != nil || len(tools.Tools) != 5 {
 		t.Fatalf("tools = %v, %v", tools, err)
 	}
 	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "run_script", Arguments: map[string]any{

@@ -3,14 +3,16 @@
 Small MCP servers that let LLM agents work with AWS:
 
 - **`aws-mcp`** calls **any AWS API** — one call at a time, or from a
-  sandboxed, Python-like script with a boto3-style client.
+  sandboxed, Python-like script with a boto3-style client — and searches
+  and reads the AWS documentation.
 - **`aws-rds-mcp`** runs read-only SQL on Aurora / RDS through the RDS Data
   API. It is a separate binary so you can give an agent database access
   independently of general AWS API access (or not at all).
 
-It is a lightweight alternative to the Python AWS API MCP server from awslabs,
-which uses around 700 MB per process. `aws-mcp` is a single static Go binary
-that idles at about **9.4 MB RSS**.
+It is a lightweight alternative to the Python AWS API and AWS Documentation MCP
+servers from awslabs; the API server alone uses around 700 MB per process.
+`aws-mcp` is a single static Go binary that idles at about **10.5 MB RSS**
+(`aws-rds-mcp`: about 9.1 MB).
 
 ```python
 ec2 = aws.client("ec2", region="ap-northeast-1")
@@ -36,14 +38,18 @@ environment, IMDS, ...) are resolved by the CLI exactly as on your terminal.
 
 ## Footprint
 
-Measured on Linux x86-64 (`/proc/<pid>/status`), Go 1.25, `CGO_ENABLED=0`
-build, after `initialize` and `tools/list`:
+Measured on Linux x86-64 (`VmRSS` in `/proc/<pid>/status`, three runs each),
+Go 1.25, `CGO_ENABLED=0 go build -trimpath -ldflags="-s -w"`, after
+`initialize` and `tools/list`:
 
-| | aws-mcp | awslabs AWS API MCP server |
-|---|---|---|
-| Idle RSS | **9.4 MB** (VmRSS 9596 kB) | ~700 MB |
-| After a 100 000-element script | 19.5 MB | – |
-| Distribution | one 8.4 MB static binary | Python package + dependencies |
+| | aws-mcp | aws-rds-mcp | awslabs AWS API MCP server |
+|---|---|---|---|
+| Idle RSS | **10.5 MB** (10456–10688 kB) | **9.1 MB** (9016–9368 kB) | ~700 MB |
+| After a 100 000-element script | 16.8 MB | – | – |
+| Distribution | one 9.5 MB static binary | one 7.9 MB static binary | Python package + dependencies |
+
+Without `-ldflags="-s -w"` (as `go install` builds them) the binaries are
+13.8 MB and 11.4 MB; idle RSS is within a few hundred kB of the stripped build.
 
 Each AWS call additionally starts a short-lived `aws` CLI process while it
 runs (the CLI is itself a bundled Python program); it exits when the call
@@ -145,6 +151,78 @@ One call, JSON in and out:
 `{"service": "ec2", "operation": "DescribeVpcs", "params": {"VpcIds": ["vpc-1"]}}`.
 Returns a single page.
 
+### `describe_aws_operation(service, operation, skeleton_only?, max_length?)`
+
+Shows what an operation takes, straight from the installed AWS CLI, without
+calling AWS or needing credentials:
+
+- the request skeleton from `aws <service> <operation> --generate-cli-skeleton input`
+  (every parameter with a placeholder value of its type, nested structures
+  included), and
+- the CLI's reference page, `aws <service> <operation> help`, trimmed to
+  NAME, DESCRIPTION, OPTIONS, OUTPUT and EXAMPLES (synopsis and global
+  options dropped; `max_length` characters, default 20 000).
+
+The CLI renders help through a pager without checking for a terminal, so the
+server sets `PAGER=cat`/`MANPAGER=cat` and strips groff's bold/underline
+sequences; it also hides the CLI config file for this one command so a
+profile's `cli_help_output = browser` cannot open a browser. On Linux/macOS
+the CLI needs `groff` or `mandoc` to render help; without them the tool still
+returns the skeleton and says why the help is missing.
+
+### `search_aws_docs(query, limit?)`
+
+Searches docs.aws.amazon.com (user guides, API and CLI references, ...) and
+returns up to `limit` (default 10, at most 50) results with title, URL and a
+snippet. It uses the search service behind the docs site's own search box:
+
+```
+POST https://proxy.search.docs.aws.amazon.com/search?session=<random id>
+{"textQuery": {"input": "<query>"},
+ "contextAttributes": [{"key": "domain", "value": "docs.aws.amazon.com"}],
+ "acceptSuggestionBody": "RawText", "locales": ["en_us"]}
+→ {"suggestions": [{"textExcerptSuggestion": {"link", "title", "summary", "suggestionBody"}}, ...]}
+```
+
+This is an undocumented endpoint of the website, not a supported AWS API; if
+AWS changes it, the tool reports the service's answer as an error.
+
+### `read_aws_docs(url, start_index?, max_length?)`
+
+Fetches a `https://docs.aws.amazon.com/` page (any other host, and any
+redirect off that host, is refused) and returns its main content as compact
+Markdown: the page body (`#main-col-body`, else `<main>`/`<article>`) without
+navigation, breadcrumbs, headers, footers, feedback widgets, scripts or
+images; headings, lists, code blocks (with their language), definition lists
+(the API references' parameter lists), tables and links (made absolute) are
+kept. The converter is a small walker over `golang.org/x/net/html`
+(`internal/awsdocs`).
+
+Long pages come in slices of `max_length` characters (default 10 000), cut at
+a line break where possible, with a note
+`[The page continues at start_index=N ...]`; the last 8 pages are cached so
+reading on does not fetch the page again.
+
+## No operation lists
+
+Nothing in `aws-mcp` enumerates services or operations, so a service or API
+released tomorrow works as soon as the installed AWS CLI knows it (update the
+CLI to get it):
+
+- names are converted generically: `aws.client("bedrock-agent").list_agents()`
+  and `call_aws("bedrock-agent", "ListAgents")` both run
+  `aws bedrock-agent list-agents` (snake_case / PascalCase → the CLI's
+  kebab-case; only three boto3 names differ from the CLI's: `s3` → `s3api`,
+  `config` → `configservice`, `codedeploy` → `deploy`);
+- read-only mode classifies by verb prefix plus a small allowlist and
+  denylist (below), not by a list of known operations;
+- `describe_aws_operation` reads parameters from the CLI's own model, and
+  `search_aws_docs` / `read_aws_docs` find what is new.
+
+A test (`TestUnknownServiceEndToEnd`) drives a made-up `quantum-ledger`
+service through `run_script`, `call_aws` and `describe_aws_operation` down to
+the fake CLI.
+
 ## Read-only mode
 
 On by default. `run_script` and `call_aws` only run operations whose name
@@ -155,7 +233,8 @@ starts with a read verb — `Describe`, `List`, `Get`, `Head`, `Search`, `Scan`,
 whose names lie (`elasticache TestFailover`, `apigateway TestInvokeMethod`,
 `cognito-identity GetId`, ...). Everything else fails with `ReadOnlyRefused`
 before any process is started. The classifier is a pure function
-(`internal/readonly`).
+(`internal/readonly`). `describe_aws_operation`, `search_aws_docs` and
+`read_aws_docs` never change anything and are always available.
 
 Start the server with `--allow-writes` (or `--read-only=false`) to allow all
 operations. Read-only mode is a guard against mistakes, not a security
@@ -183,44 +262,6 @@ Every flag has an environment variable default.
 
 Region and profile resolve as: per-client argument > tool argument > server
 flag > the CLI's own resolution (`AWS_REGION`, `AWS_PROFILE`, config files).
-
-### `describe_aws_operation(service, operation, skeleton_only?, max_length?)`
-
-Shows what an operation takes, straight from the installed AWS CLI, without
-calling AWS or needing credentials:
-
-- the request skeleton from `aws <service> <operation> --generate-cli-skeleton input`
-  (every parameter with a placeholder value of its type, nested structures
-  included), and
-- the CLI's reference page, `aws <service> <operation> help`, trimmed to
-  NAME, DESCRIPTION, OPTIONS, OUTPUT and EXAMPLES (synopsis and global
-  options dropped; `max_length` characters, default 20 000).
-
-The CLI renders help through a pager without checking for a terminal, so the
-server sets `PAGER=cat`/`MANPAGER=cat` and strips groff's bold/underline
-sequences; it also hides the CLI config file for this one command so a
-profile's `cli_help_output = browser` cannot open a browser. On Linux/macOS
-the CLI needs `groff` or `mandoc` to render help; without them the tool still
-returns the skeleton and says why the help is missing.
-
-## No operation lists
-
-Nothing in `aws-mcp` enumerates services or operations, so a service or API
-released tomorrow works as soon as the installed AWS CLI knows it (update the
-CLI to get it):
-
-- names are converted generically: `aws.client("bedrock-agent").list_agents()`
-  and `call_aws("bedrock-agent", "ListAgents")` both run
-  `aws bedrock-agent list-agents` (snake_case / PascalCase → the CLI's
-  kebab-case; only three boto3 names differ from the CLI's: `s3` → `s3api`,
-  `config` → `configservice`, `codedeploy` → `deploy`);
-- read-only mode classifies by verb prefix plus a small allowlist and
-  denylist (below), not by a list of known operations;
-- `describe_aws_operation` reads parameters from the CLI's own model.
-
-A test (`TestUnknownServiceEndToEnd`) drives a made-up `quantum-ledger`
-service through `run_script`, `call_aws` and `describe_aws_operation` down to
-the fake CLI.
 
 ## `aws-rds-mcp`: `rds_query(resource_arn, secret_arn, database, sql, parameters?, region?, profile?)`
 
@@ -279,6 +320,9 @@ aws.client("s3").get_object(Bucket="my-bucket", Key="config.json")["Body"]
   inputs take raw strings (`--cli-binary-format raw-in-base64-out`);
   event-stream operations are not supported.
 - Requires AWS CLI **v2**.
+- The documentation tools need HTTPS access to `docs.aws.amazon.com` and
+  `proxy.search.docs.aws.amazon.com`; the search endpoint is the website's,
+  not a documented API.
 
 ## Development
 
@@ -287,7 +331,9 @@ go vet ./... && go test ./...
 ```
 
 Tests never touch AWS: the test binary doubles as a fake `aws` executable
-(`internal/fakeaws`) that answers from canned rules and logs each invocation.
+(`internal/fakeaws`) that answers from canned rules and logs each invocation,
+and the documentation tools are tested against handwritten HTML and search
+responses through a fake HTTP transport.
 
 Layout:
 
@@ -300,10 +346,11 @@ internal/script/    Starlark runtime and the aws module
 internal/readonly/  read-only classifier and Caller guard
 internal/rdsdata/   rds_query: SQL guard + rolled-back Data API transaction
 internal/awsname/   boto3 / API / CLI name conversion
+internal/awsdocs/   docs search, page fetch and HTML -> Markdown
 internal/fakeaws/   fake aws executable for tests
 ```
 
 ## License
 
-MIT. This is an independent, clean-room implementation; it contains no code
-from awslabs/mcp.
+MIT. This is an independent, clean-room implementation, documentation tools
+included; it contains no code from awslabs/mcp.

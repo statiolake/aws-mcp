@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/statiolake/aws-mcp/internal/awsdocs"
 	"github.com/statiolake/aws-mcp/internal/awsname"
 	"github.com/statiolake/aws-mcp/internal/caller"
 	"github.com/statiolake/aws-mcp/internal/mcpx"
@@ -40,13 +42,32 @@ type DescribeInput struct {
 	MaxLength    int    `json:"max_length,omitempty" jsonschema:"maximum characters of help text (default 20000)"`
 }
 
-// newServer builds the server. backend is normally nil (the AWS CLI
-// configured by cfg); tests pass a CLI that runs the fake executable.
-func newServer(cfg *Config, backend *caller.CLI) *mcp.Server {
+// SearchDocsInput is the input of search_aws_docs.
+type SearchDocsInput struct {
+	Query string `json:"query" jsonschema:"search terms, e.g. 'S3 bucket policy condition keys'"`
+	Limit int    `json:"limit,omitempty" jsonschema:"maximum number of results (default 10, at most 50)"`
+}
+
+// ReadDocsInput is the input of read_aws_docs.
+type ReadDocsInput struct {
+	URL        string `json:"url" jsonschema:"a https://docs.aws.amazon.com/ page URL"`
+	StartIndex int    `json:"start_index,omitempty" jsonschema:"character offset to start from (default 0); use the value from a previous 'continues at' note"`
+	MaxLength  int    `json:"max_length,omitempty" jsonschema:"maximum characters to return (default 10000)"`
+}
+
+// newServer builds the server. backend and docs are normally nil (the AWS
+// CLI configured by cfg, and docs.aws.amazon.com); tests pass fakes.
+func newServer(cfg *Config, backend *caller.CLI, docs *awsdocs.Client) *mcp.Server {
 	if backend == nil {
 		backend = caller.NewCLI(caller.CLI{
 			Path: cfg.AWSCLI, Region: cfg.Region, Profile: cfg.Profile, Timeout: cfg.CallTimeout,
 			MaxConcurrent: cfg.Limits.MaxConcurrency, MaxBodyBytes: cfg.MaxBody,
+		})
+	}
+	if docs == nil {
+		docs = awsdocs.New(awsdocs.Options{
+			HTTP:      &http.Client{Timeout: cfg.CallTimeout},
+			UserAgent: "aws-mcp/" + buildVersion(),
 		})
 	}
 	var api caller.Caller = backend
@@ -108,8 +129,68 @@ func newServer(cfg *Config, backend *caller.CLI) *mcp.Server {
 		}
 		return textResult(limitText(text, cfg.Limits.MaxOutputBytes), false), nil, nil
 	})
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "search_aws_docs",
+		Title:       "Search the AWS documentation",
+		Description: searchDocsDescription,
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld},
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in SearchDocsInput) (*mcp.CallToolResult, any, error) {
+		limit := in.Limit
+		if limit <= 0 {
+			limit = 10
+		}
+		limit = min(limit, 50)
+		res, err := docs.Search(ctx, in.Query, limit)
+		if err != nil {
+			return textResult("Error: "+err.Error(), true), nil, nil
+		}
+		if len(res) == 0 {
+			return textResult("No results.", false), nil, nil
+		}
+		var b strings.Builder
+		for i, r := range res {
+			fmt.Fprintf(&b, "%d. %s\n   %s\n", i+1, r.Title, r.URL)
+			if r.Snippet != "" {
+				fmt.Fprintf(&b, "   %s\n", r.Snippet)
+			}
+		}
+		return textResult(limitText(b.String(), cfg.Limits.MaxOutputBytes), false), nil, nil
+	})
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "read_aws_docs",
+		Title:       "Read an AWS documentation page",
+		Description: readDocsDescription,
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &openWorld},
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in ReadDocsInput) (*mcp.CallToolResult, any, error) {
+		maxLen := in.MaxLength
+		if maxLen <= 0 {
+			maxLen = defaultDocsLength
+		}
+		p, err := docs.Read(ctx, in.URL, in.StartIndex, maxLen)
+		if err != nil {
+			return textResult("Error: "+err.Error(), true), nil, nil
+		}
+		var b strings.Builder
+		if p.Start > 0 {
+			fmt.Fprintf(&b, "[%s, from character %d of %d]\n\n", p.URL, p.Start, p.Total)
+		}
+		b.WriteString(p.Content)
+		if p.NextOffset > 0 {
+			fmt.Fprintf(&b, "\n\n[The page continues at start_index=%d (%d characters in total); call read_aws_docs again with start_index=%d to read on.]", p.NextOffset, p.Total, p.NextOffset)
+		} else if p.Content == "" {
+			fmt.Fprintf(&b, "[No content at start_index=%d: the page has %d characters.]", p.Start, p.Total)
+		}
+		return textResult(limitText(b.String(), cfg.Limits.MaxOutputBytes), false), nil, nil
+	})
 	return srv
 }
+
+const defaultDocsLength = 10000
+
+const searchDocsDescription = `Search the AWS documentation (docs.aws.amazon.com: user guides, API and CLI references, ...) with the same search service as the site's search box. Returns numbered results with title, URL and a short snippet; read a result with read_aws_docs. Use it to find the right service, operation or parameter names, limits and behaviour, especially for features newer than your training data.`
+
+const readDocsDescription = `Fetch a page from https://docs.aws.amazon.com/ (other hosts are refused) and return its main content as compact Markdown, without navigation, headers or footers. Long pages are returned in slices of max_length characters (default 10000); a note at the end gives the start_index to continue from.`
 
 const describeDescription = `Show what an AWS API operation takes, from the installed AWS CLI itself, so it works for any operation of any service the CLI knows, including brand-new ones. No AWS call is made and no credentials are needed.
 Returns the request parameter skeleton (aws <service> <operation> --generate-cli-skeleton input: every parameter name with a placeholder value of its type, nested structures included) and the CLI's reference page for the operation (description, each parameter's documentation, the output shape and examples).
@@ -182,7 +263,7 @@ func readOnlyNote(cfg *Config) string {
 }
 
 func serverInstructions(cfg *Config) string {
-	s := "Call AWS APIs. Prefer run_script for anything beyond a single call: it runs a boto3-like Starlark script so you can combine calls, paginate, run calls concurrently and return only what matters. Use call_aws for one simple call."
+	s := "Call AWS APIs. Prefer run_script for anything beyond a single call: it runs a boto3-like Starlark script so you can combine calls, paginate, run calls concurrently and return only what matters. Use call_aws for one simple call. Any operation the installed AWS CLI knows works; describe_aws_operation shows an operation's parameters, and search_aws_docs / read_aws_docs search and read docs.aws.amazon.com."
 	return s + " " + readOnlyNote(cfg)
 }
 
@@ -203,7 +284,7 @@ const runScriptTemplate = `Run a Starlark (Python-like) script that calls AWS wi
 API
 - aws.client(service, region=None, profile=None) -> client. service is the boto3 name: "ec2", "s3", "iam", "logs", "rds", "lambda", ...
 - client.<operation_in_snake_case>(**params) -> dict: the API response as dicts/lists. Params are keyword arguments with the API's PascalCase names, exactly as in boto3.
-- Operations are generic: nothing is listed in this server, names are converted (describe_db_instances -> aws rds describe-db-instances), so every operation of every service the installed AWS CLI knows works, new ones included (update the AWS CLI to get APIs released after it). To check an operation's exact parameters use the describe_aws_operation tool.
+- Operations are generic: nothing is listed in this server, names are converted (describe_db_instances -> aws rds describe-db-instances), so every operation of every service the installed AWS CLI knows works, new ones included (update the AWS CLI to get APIs released after it). To check an operation's exact parameters use the describe_aws_operation tool; to find services, operations and behaviour in the documentation use search_aws_docs and read_aws_docs.
 - client.call("DescribeInstances", **params): the same, with the operation as a string.
 - client.paginate("operation", **params) -> list of pages; follows NextToken/Marker/ContinuationToken/... automatically, up to {MAXPAGES} pages (pass _max_pages=N for more).
 - aws.batch([(client, "operation", {params}), ...], return_errors=False) -> list of results in order, run concurrently. Use it for many regions/resources: every call costs ~0.5-1 s. With return_errors=True a failed item is {"Error": {"Code": ..., "Message": ...}} instead of failing the script.
