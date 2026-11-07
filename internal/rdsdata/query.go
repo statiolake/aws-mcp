@@ -39,8 +39,8 @@ type Result struct {
 	RollbackError   string            `json:"rollbackError,omitempty"`
 }
 
-// Runner executes queries. The Caller is used directly (not through the
-// read-only Guard): rds_query has its own protections.
+// Runner executes queries. rds_query has its own protections (CheckReadOnly
+// and an always rolled-back transaction).
 type Runner struct {
 	Caller caller.Caller
 	// SetReadOnlyTxn issues SET TRANSACTION READ ONLY after BEGIN (honoured

@@ -5,8 +5,7 @@
 //	r = ec2.describe_instances(Filters=[{"Name": "instance-state-name", "Values": ["running"]}])
 //
 // Scripts are hermetic: the only way out of the interpreter is the aws module,
-// which goes through a caller.Caller (and so through read-only mode, when the
-// server wraps the Caller in readonly.Guard).
+// which goes through a caller.Caller.
 package script
 
 import (

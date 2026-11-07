@@ -3,8 +3,7 @@
 Small MCP servers that let LLM agents work with AWS:
 
 - **`aws-mcp`** calls **any AWS API** — one call at a time, or from a
-  sandboxed, Python-like script with a boto3-style client — and searches
-  and reads the AWS documentation.
+  sandboxed, Python-like script with a boto3-style client.
 - **`aws-rds-mcp`** runs read-only SQL on Aurora / RDS through the RDS Data
   API. It is a separate binary so you can give an agent database access
   independently of general AWS API access (or not at all).
@@ -194,31 +193,27 @@ CLI to get it):
   `aws bedrock-agent list-agents` (snake_case / PascalCase → the CLI's
   kebab-case; only three boto3 names differ from the CLI's: `s3` → `s3api`,
   `config` → `configservice`, `codedeploy` → `deploy`);
-- read-only mode classifies by verb prefix plus a small allowlist and
-  denylist (below), not by a list of known operations;
 - `describe_aws_operation` reads parameters from the CLI's own model.
 
 A test (`TestUnknownServiceEndToEnd`) drives a made-up `quantum-ledger`
 service through `run_script`, `call_aws` and `describe_aws_operation` down to
 the fake CLI.
 
-## Read-only mode
+## Permissions
 
-On by default. `run_script` and `call_aws` only run operations whose name
-starts with a read verb — `Describe`, `List`, `Get`, `Head`, `Search`, `Scan`,
-`Query`, `BatchGet`, `BatchDescribe`, `Lookup`, `Select`, `Validate`,
-`Estimate`, `Preview`, `Test`, `Simulate`, `Filter` — plus an allowlist
-(CloudWatch Logs `StartQuery`/`StopQuery`), minus a denylist of operations
-whose names lie (`elasticache TestFailover`, `apigateway TestInvokeMethod`,
-`cognito-identity GetId`, ...). Everything else fails with `ReadOnlyRefused`
-before any process is started. The classifier is a pure function
-(`internal/readonly`). `describe_aws_operation` never changes anything and is
-always available.
+`aws-mcp` does not restrict what `run_script` and `call_aws` do: any
+operation runs that the CLI's credentials are allowed to perform, writes and
+deletes included. Restrict agents with IAM. To keep them read-only, run the
+server with a profile whose role has the `ReadOnlyAccess` managed policy (or a
+narrower policy of your own):
 
-Start the server with `--allow-writes` (or `--read-only=false`) to allow all
-operations. Read-only mode is a guard against mistakes, not a security
-boundary: `Get*` includes things like `secretsmanager GetSecretValue`. Use IAM
-(a read-only role or profile) for real enforcement.
+```sh
+claude mcp add aws -e AWS_PROFILE=readonly -- aws-mcp
+```
+
+Claude Code's per-tool permission prompts are a second layer on top: as long
+as `run_script` and `call_aws` are not on the allow list, Claude Code asks
+before each call and shows the script or request.
 
 ## Configuration of `aws-mcp`
 
@@ -229,7 +224,6 @@ Every flag has an environment variable default.
 | `--region` | `AWS_MCP_REGION` | CLI's own | default region |
 | `--profile` | `AWS_MCP_PROFILE` | CLI's own | default profile |
 | `--aws-cli` | `AWS_MCP_AWS_CLI` | `aws` | path to the AWS CLI v2 |
-| `--read-only` / `--allow-writes` | `AWS_MCP_READ_ONLY` / `AWS_MCP_ALLOW_WRITES` | read-only | |
 | `--call-timeout` | `AWS_MCP_CALL_TIMEOUT` | `1m` | per AWS call |
 | `--script-timeout` | `AWS_MCP_SCRIPT_TIMEOUT` | `2m` | per script |
 | `--max-steps` | `AWS_MCP_MAX_STEPS` | 10000000 | Starlark steps per script |
@@ -317,7 +311,6 @@ cmd/aws-rds-mcp/    RDS Data API server (rds_query)
 internal/mcpx/      helpers shared by both commands
 internal/caller/    Caller interface + AWS CLI backend
 internal/script/    Starlark runtime and the aws module
-internal/readonly/  read-only classifier and Caller guard
 internal/rdsdata/   rds_query: SQL guard + rolled-back Data API transaction
 internal/awsname/   boto3 / API / CLI name conversion
 internal/fakeaws/   fake aws executable for tests

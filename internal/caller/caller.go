@@ -56,7 +56,6 @@ const (
 	CodeCLI              = "CLIError"          // the CLI failed without an AWS error code
 	CodeParamValidation  = "ParamValidation"   // the CLI rejected the parameters
 	CodeTimeout          = "Timeout"           // the call exceeded its time limit
-	CodeReadOnlyRefused  = "ReadOnlyRefused"   // refused by the server's read-only mode
 	CodeCallLimit        = "CallLimitExceeded" // the script used up its API call budget
 	CodeNoCredentials    = "NoCredentials"     // the CLI found no credentials
 	CodeInvalidOperation = "InvalidOperation"  // unknown service or operation

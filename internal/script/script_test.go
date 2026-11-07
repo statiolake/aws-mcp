@@ -13,7 +13,6 @@ import (
 
 	"github.com/statiolake/aws-mcp/internal/caller"
 	"github.com/statiolake/aws-mcp/internal/fakeaws"
-	"github.com/statiolake/aws-mcp/internal/readonly"
 )
 
 func TestMain(m *testing.M) {
@@ -261,23 +260,6 @@ print(r, err)
 	}
 }
 
-func TestReadOnlyRefusal(t *testing.T) {
-	rec := &recorder{}
-	c := readonly.Guard{Next: rec}
-	res := runScript(t, c, Limits{}, `aws.client("ec2").terminate_instances(InstanceIds=["i-1"])`)
-	if res.Err == nil || !strings.Contains(res.Err.Error(), "ReadOnlyRefused") || !strings.Contains(res.Err.Error(), "--allow-writes") {
-		t.Fatalf("err = %v", res.Err)
-	}
-	res = runScript(t, c, Limits{}, `aws.batch([(aws.client("ec2"), "describe_vpcs"), (aws.client("s3"), "delete_bucket", {"Bucket": "b"})], return_errors=True)[1]["Error"]["Code"]`)
-	mustOK(t, res)
-	if res.Output != "ReadOnlyRefused\n" {
-		t.Fatalf("output = %q", res.Output)
-	}
-	if len(rec.reqs) != 1 {
-		t.Fatalf("backend saw %d calls", len(rec.reqs))
-	}
-}
-
 func TestLimitSteps(t *testing.T) {
 	res := runScript(t, &recorder{}, Limits{MaxSteps: 10000}, "x = 0\nwhile True:\n  x += 1\n")
 	if res.Err == nil || !strings.Contains(res.Err.Error(), "execution steps") {
@@ -382,7 +364,7 @@ func TestWithFakeCLI(t *testing.T) {
 			Stderr: "\nAn error occurred (NoSuchEntity) when calling the GetRole operation: The role with name x cannot be found.\n"},
 	})
 	cli := caller.NewCLI(caller.CLI{Path: f.Path, Env: f.Env})
-	r := &Runner{Caller: readonly.Guard{Next: cli}}
+	r := &Runner{Caller: cli}
 	res := r.Run(context.Background(), `
 ec2 = aws.client("ec2")
 ids = [i["InstanceId"] for p in ec2.paginate("describe_instances", MaxResults=5) for res in p["Reservations"] for i in res["Instances"]]

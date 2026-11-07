@@ -65,14 +65,6 @@ func (e Env) String(name, def string) string {
 	return def
 }
 
-// Bool returns the variable as a bool, or def.
-func (e Env) Bool(name string, def bool) bool {
-	if b, err := strconv.ParseBool(e.Getenv(e.Prefix + name)); err == nil {
-		return b
-	}
-	return def
-}
-
 // Duration returns the variable as a time.Duration, or def.
 func (e Env) Duration(name string, def time.Duration) time.Duration {
 	if d, err := time.ParseDuration(e.Getenv(e.Prefix + name)); err == nil {

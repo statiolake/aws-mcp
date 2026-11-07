@@ -40,22 +40,22 @@ func testConfig(t *testing.T, args ...string) *Config {
 
 func TestParseConfig(t *testing.T) {
 	cfg := testConfig(t)
-	if !cfg.ReadOnly || cfg.AWSCLI != "aws" || cfg.Limits.MaxCalls != script.DefaultLimits.MaxCalls {
+	if cfg.AWSCLI != "aws" || cfg.Limits.MaxCalls != script.DefaultLimits.MaxCalls {
 		t.Fatalf("defaults = %+v", cfg)
 	}
-	cfg = testConfig(t, "--allow-writes", "--region", "eu-west-1", "--max-calls", "7", "--script-timeout", "5s")
-	if cfg.ReadOnly || cfg.Region != "eu-west-1" || cfg.Limits.MaxCalls != 7 || cfg.Limits.Timeout != 5*time.Second {
+	cfg = testConfig(t, "--region", "eu-west-1", "--max-calls", "7", "--script-timeout", "5s")
+	if cfg.Region != "eu-west-1" || cfg.Limits.MaxCalls != 7 || cfg.Limits.Timeout != 5*time.Second {
 		t.Fatalf("flags = %+v", cfg)
 	}
-	env := map[string]string{"AWS_MCP_READ_ONLY": "false", "AWS_MCP_PROFILE": "dev", "AWS_MCP_AWS_CLI": "/opt/aws"}
+	env := map[string]string{"AWS_MCP_PROFILE": "dev", "AWS_MCP_AWS_CLI": "/opt/aws"}
 	cfg, _, err := parseConfig(nil, func(k string) string { return env[k] }, io.Discard)
-	if err != nil || cfg.ReadOnly || cfg.Profile != "dev" || cfg.AWSCLI != "/opt/aws" {
+	if err != nil || cfg.Profile != "dev" || cfg.AWSCLI != "/opt/aws" {
 		t.Fatalf("env = %+v, %v", cfg, err)
 	}
 	// Flags override the environment.
-	cfg, _, _ = parseConfig([]string{"--read-only"}, func(k string) string { return env[k] }, io.Discard)
-	if !cfg.ReadOnly {
-		t.Fatal("--read-only did not override env")
+	cfg, _, _ = parseConfig([]string{"--profile", "prod"}, func(k string) string { return env[k] }, io.Discard)
+	if cfg.Profile != "prod" {
+		t.Fatal("--profile did not override env")
 	}
 	if _, _, err := parseConfig([]string{"--max-calls", "0"}, func(string) string { return "" }, io.Discard); err == nil {
 		t.Fatal("zero limit accepted")
@@ -122,13 +122,22 @@ func TestListTools(t *testing.T) {
 		}
 	}
 	d := names["run_script"].Description
-	for _, s := range []string{"aws.client", "paginate", "aws.batch", "aws.try_call", "read-only mode", "Example"} {
+	for _, s := range []string{"aws.client", "paginate", "aws.batch", "aws.try_call", "IAM permissions", "Example"} {
 		if !strings.Contains(d, s) {
 			t.Errorf("run_script description lacks %q", s)
 		}
 	}
-	if !names["call_aws"].Annotations.ReadOnlyHint {
-		t.Error("call_aws not annotated read-only")
+	for _, n := range []string{"run_script", "call_aws"} {
+		a := names[n].Annotations
+		if a.ReadOnlyHint || a.DestructiveHint == nil || !*a.DestructiveHint {
+			t.Errorf("%s annotations = %+v", n, a)
+		}
+		if !strings.Contains(names[n].Description, "IAM permissions") {
+			t.Errorf("%s description: %q", n, names[n].Description)
+		}
+	}
+	if !names["describe_aws_operation"].Annotations.ReadOnlyHint {
+		t.Error("describe_aws_operation not annotated read-only")
 	}
 
 	if len(res.Tools) != 3 {
@@ -136,17 +145,6 @@ func TestListTools(t *testing.T) {
 	}
 	if _, _, err := parseConfig([]string{"--no-rds"}, func(string) string { return "" }, io.Discard); err == nil {
 		t.Fatal("--no-rds still accepted")
-	}
-
-	cs, _ = fakeServer(t, "--allow-writes")
-	res, _ = cs.ListTools(context.Background(), nil)
-	for _, tl := range res.Tools {
-		if tl.Name != "run_script" && tl.Name != "call_aws" {
-			continue // the other tools never change anything
-		}
-		if strings.Contains(tl.Description, "read-only mode") || tl.Annotations.ReadOnlyHint {
-			t.Errorf("%s still claims read-only", tl.Name)
-		}
 	}
 }
 
@@ -169,12 +167,13 @@ r["input"]
 		t.Fatalf("invocations = %+v", inv)
 	}
 
-	out, isErr = callTool(t, cs, "run_script", map[string]any{"script": `aws.client("ec2").terminate_instances(InstanceIds=["i-1"])`})
-	if !isErr || !strings.Contains(out, "ReadOnlyRefused") {
+	// Writes are not refused by the server; IAM decides.
+	out, isErr = callTool(t, cs, "run_script", map[string]any{"script": `len(aws.client("ec2").terminate_instances(InstanceIds=["i-1"])["TerminatingInstances"])`})
+	if isErr || out != "0\n" {
 		t.Fatalf("out = %q", out)
 	}
-	if len(f.Invocations()) != 2 {
-		t.Fatal("refused call reached the CLI")
+	if len(f.Invocations()) != 3 {
+		t.Fatal("write did not reach the CLI")
 	}
 
 	out, isErr = callTool(t, cs, "run_script", map[string]any{"script": "x = (", "region": "eu-west-1"})
@@ -194,29 +193,22 @@ func TestCallAWSTool(t *testing.T) {
 	if got["region"] != "us-west-2" || got["profile"] != "p" {
 		t.Fatalf("got = %v", got)
 	}
-	out, isErr = callTool(t, cs, "call_aws", map[string]any{"service": "ec2", "operation": "terminate_instances", "params": map[string]any{"InstanceIds": []string{"i-1"}}})
-	if !isErr || !strings.Contains(out, "ReadOnlyRefused") || !strings.Contains(out, "--allow-writes") {
-		t.Fatalf("out = %q", out)
+	out, isErr = callTool(t, cs, "call_aws", map[string]any{"service": "ec2", "operation": "TerminateInstances", "params": map[string]any{"InstanceIds": []string{"i-1"}}})
+	if isErr || !strings.Contains(out, "TerminatingInstances") {
+		t.Fatalf("write out = %q", out)
 	}
 	out, isErr = callTool(t, cs, "call_aws", map[string]any{"service": "ec2", "operation": "DescribeNoSuchThing"})
 	if !isErr || !strings.Contains(out, "InvalidOperation") {
 		t.Fatalf("out = %q", out)
 	}
-	if n := len(f.Invocations()); n != 2 {
+	if n := len(f.Invocations()); n != 3 {
 		t.Fatalf("invocations = %d", n)
-	}
-
-	cs, _ = fakeServer(t, "--allow-writes")
-	out, isErr = callTool(t, cs, "call_aws", map[string]any{"service": "ec2", "operation": "TerminateInstances", "params": map[string]any{"InstanceIds": []string{"i-1"}}})
-	if isErr || !strings.Contains(out, "TerminatingInstances") {
-		t.Fatalf("allow-writes out = %q", out)
 	}
 }
 
 // TestUnknownServiceEndToEnd drives a made-up service and operations, which
 // appear in no list anywhere in the code, through every layer down to the
-// (fake) CLI: names are converted generically and the read-only classifier
-// works by verb.
+// (fake) CLI: names are converted generically, and every operation runs.
 func TestUnknownServiceEndToEnd(t *testing.T) {
 	f := fakeaws.New(t, []fakeaws.Rule{
 		{Service: "quantum-ledger", Operation: "list-entanglement-proofs", Match: map[string]any{"NextToken": "p2"},
@@ -245,12 +237,16 @@ d = ql.describe_qubit_array(ArrayId="qa-1", IncludeCalibration=True)
 		t.Fatalf("call_aws = %q", out)
 	}
 	out, isErr = callTool(t, cs, "call_aws", map[string]any{"service": "quantum-ledger", "operation": "EntangleQubits"})
-	if !isErr || !strings.Contains(out, "ReadOnlyRefused") {
-		t.Fatalf("write in read-only mode = %q", out)
+	if isErr || !strings.Contains(out, `"ProofId":"x"`) {
+		t.Fatalf("write = %q", out)
+	}
+	out, isErr = callTool(t, cs, "run_script", map[string]any{"script": `aws.client("quantum-ledger").entangle_qubits(Qubits=[1, 2])["ProofId"]`})
+	if isErr || out != "x\n" {
+		t.Fatalf("run_script write = %q", out)
 	}
 	out, isErr = callTool(t, cs, "describe_aws_operation", map[string]any{"service": "quantum-ledger", "operation": "describe_qubit_array"})
 	if isErr || !strings.Contains(out, `"IncludeCalibration": true`) || !strings.Contains(out, "Describes a qubit array.") ||
-		!strings.Contains(out, "aws quantum-ledger describe-qubit-array") || !strings.Contains(out, "Read-only mode: allowed") {
+		!strings.Contains(out, "aws quantum-ledger describe-qubit-array") {
 		t.Fatalf("describe = %q", out)
 	}
 	out, _ = callTool(t, cs, "describe_aws_operation", map[string]any{"service": "quantum-ledger", "operation": "EntangleQubits", "skeleton_only": true})
@@ -264,14 +260,8 @@ d = ql.describe_qubit_array(ArrayId="qa-1", IncludeCalibration=True)
 	}
 	got := strings.Join(ops, ",")
 	if strings.Count(got, "quantum-ledger list-entanglement-proofs") != 2 || strings.Count(got, "describe-qubit-array") != 4 ||
-		strings.Count(got, "entangle-qubits") != 1 {
+		strings.Count(got, "entangle-qubits") != 3 {
 		t.Fatalf("invocations = %s", got)
-	}
-
-	cs = connect(t, newServer(testConfig(t, "--allow-writes"), caller.NewCLI(caller.CLI{Path: f.Path, Env: f.Env, Timeout: 10 * time.Second})))
-	out, isErr = callTool(t, cs, "run_script", map[string]any{"script": `aws.client("quantum-ledger").entangle_qubits(Qubits=[1, 2])["ProofId"]`})
-	if isErr || out != "x\n" {
-		t.Fatalf("allow-writes = %q", out)
 	}
 }
 
