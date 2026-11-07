@@ -5,7 +5,6 @@ go 1.25.0
 require (
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	go.starlark.net v0.0.0-20261021141710-4f4267fb140d
-	golang.org/x/net v0.58.0
 )
 
 require (

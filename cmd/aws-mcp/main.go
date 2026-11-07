@@ -37,7 +37,7 @@ func realMain(args []string) int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	srv := newServer(cfg, nil, nil)
+	srv := newServer(cfg, nil)
 	if err := srv.Run(ctx, &mcp.StdioTransport{}); err != nil && ctx.Err() == nil {
 		fmt.Fprintln(os.Stderr, "aws-mcp:", err)
 		return 1
