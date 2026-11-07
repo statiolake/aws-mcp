@@ -116,7 +116,7 @@ func TestListTools(t *testing.T) {
 	for _, tl := range res.Tools {
 		names[tl.Name] = tl
 	}
-	for _, n := range []string{"run_script", "call_aws"} {
+	for _, n := range []string{"run_script", "call_aws", "describe_aws_operation"} {
 		if names[n] == nil {
 			t.Fatalf("tool %s missing; have %v", n, names)
 		}
@@ -131,7 +131,7 @@ func TestListTools(t *testing.T) {
 		t.Error("call_aws not annotated read-only")
 	}
 
-	if len(res.Tools) != 2 {
+	if len(res.Tools) != 3 {
 		t.Fatalf("%d tools", len(res.Tools))
 	}
 	if _, _, err := parseConfig([]string{"--no-rds"}, func(string) string { return "" }, io.Discard); err == nil {
@@ -141,6 +141,9 @@ func TestListTools(t *testing.T) {
 	cs, _ = fakeServer(t, "--allow-writes")
 	res, _ = cs.ListTools(context.Background(), nil)
 	for _, tl := range res.Tools {
+		if tl.Name == "describe_aws_operation" {
+			continue // never calls AWS
+		}
 		if strings.Contains(tl.Description, "read-only mode") || tl.Annotations.ReadOnlyHint {
 			t.Errorf("%s still claims read-only", tl.Name)
 		}
@@ -210,6 +213,68 @@ func TestCallAWSTool(t *testing.T) {
 	}
 }
 
+// TestUnknownServiceEndToEnd drives a made-up service and operations, which
+// appear in no list anywhere in the code, through every layer down to the
+// (fake) CLI: names are converted generically and the read-only classifier
+// works by verb.
+func TestUnknownServiceEndToEnd(t *testing.T) {
+	f := fakeaws.New(t, []fakeaws.Rule{
+		{Service: "quantum-ledger", Operation: "list-entanglement-proofs", Match: map[string]any{"NextToken": "p2"},
+			Stdout: map[string]any{"Proofs": []any{"c"}}},
+		{Service: "quantum-ledger", Operation: "list-entanglement-proofs",
+			Stdout: map[string]any{"Proofs": []any{"a", "b"}, "NextToken": "p2"}},
+		{Service: "quantum-ledger", Operation: "describe-qubit-array", Echo: true,
+			Skeleton: map[string]any{"ArrayId": "", "IncludeCalibration": true},
+			Help:     "NAME\n       describe-qubit-array -\n\nDESCRIPTION\n       Describes a qubit array.\n"},
+		{Service: "quantum-ledger", Operation: "entangle-qubits", Stdout: map[string]any{"ProofId": "x"}},
+	})
+	cfg := testConfig(t)
+	cs := connect(t, newServer(cfg, caller.NewCLI(caller.CLI{Path: f.Path, Env: f.Env, Timeout: 10 * time.Second})))
+
+	out, isErr := callTool(t, cs, "run_script", map[string]any{"script": `
+ql = aws.client("quantum-ledger", region="eu-north-1")
+pages = ql.paginate("list_entanglement_proofs")
+d = ql.describe_qubit_array(ArrayId="qa-1", IncludeCalibration=True)
+[p for page in pages for p in page["Proofs"]], d["input"], d["region"]`})
+	if isErr || out != `[["a","b","c"],{"ArrayId":"qa-1","IncludeCalibration":true},"eu-north-1"]`+"\n" {
+		t.Fatalf("run_script = %q", out)
+	}
+	out, isErr = callTool(t, cs, "call_aws", map[string]any{"service": "quantum-ledger", "operation": "DescribeQubitArray",
+		"params": map[string]any{"ArrayId": "qa-2"}})
+	if isErr || !strings.Contains(out, `"ArrayId":"qa-2"`) {
+		t.Fatalf("call_aws = %q", out)
+	}
+	out, isErr = callTool(t, cs, "call_aws", map[string]any{"service": "quantum-ledger", "operation": "EntangleQubits"})
+	if !isErr || !strings.Contains(out, "ReadOnlyRefused") {
+		t.Fatalf("write in read-only mode = %q", out)
+	}
+	out, isErr = callTool(t, cs, "describe_aws_operation", map[string]any{"service": "quantum-ledger", "operation": "describe_qubit_array"})
+	if isErr || !strings.Contains(out, `"IncludeCalibration": true`) || !strings.Contains(out, "Describes a qubit array.") ||
+		!strings.Contains(out, "aws quantum-ledger describe-qubit-array") || !strings.Contains(out, "Read-only mode: allowed") {
+		t.Fatalf("describe = %q", out)
+	}
+	out, _ = callTool(t, cs, "describe_aws_operation", map[string]any{"service": "quantum-ledger", "operation": "EntangleQubits", "skeleton_only": true})
+	if !strings.Contains(out, "no skeleton") { // the fake has no skeleton for it; the CLI error is passed on
+		t.Fatalf("describe without skeleton = %q", out)
+	}
+
+	var ops []string
+	for _, inv := range f.Invocations() {
+		ops = append(ops, inv.Service+" "+strings.Join(inv.Args[1:2], ""))
+	}
+	got := strings.Join(ops, ",")
+	if strings.Count(got, "quantum-ledger list-entanglement-proofs") != 2 || strings.Count(got, "describe-qubit-array") != 4 ||
+		strings.Count(got, "entangle-qubits") != 1 {
+		t.Fatalf("invocations = %s", got)
+	}
+
+	cs = connect(t, newServer(testConfig(t, "--allow-writes"), caller.NewCLI(caller.CLI{Path: f.Path, Env: f.Env, Timeout: 10 * time.Second})))
+	out, isErr = callTool(t, cs, "run_script", map[string]any{"script": `aws.client("quantum-ledger").entangle_qubits(Qubits=[1, 2])["ProofId"]`})
+	if isErr || out != "x\n" {
+		t.Fatalf("allow-writes = %q", out)
+	}
+}
+
 // TestDescriptionExamples runs the examples from the run_script description.
 func TestDescriptionExamples(t *testing.T) {
 	desc := runScriptDescription(testConfig(t))
@@ -260,7 +325,7 @@ func TestStdio(t *testing.T) {
 	}
 	defer cs.Close()
 	tools, err := cs.ListTools(ctx, nil)
-	if err != nil || len(tools.Tools) != 2 {
+	if err != nil || len(tools.Tools) != 3 {
 		t.Fatalf("tools = %v, %v", tools, err)
 	}
 	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "run_script", Arguments: map[string]any{

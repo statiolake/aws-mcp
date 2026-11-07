@@ -36,6 +36,12 @@ type Rule struct {
 	Body string `json:"body,omitempty"`
 	// Echo prints {"input":..., "region":..., "profile":...} instead of Stdout.
 	Echo bool `json:"echo,omitempty"`
+	// Skeleton is printed for --generate-cli-skeleton input.
+	Skeleton any `json:"skeleton,omitempty"`
+	// Help is printed for "aws <service> <operation> help", but only when
+	// PAGER is cat (the real CLI would otherwise start less) and AWS_PROFILE
+	// is unset.
+	Help string `json:"help,omitempty"`
 }
 
 // Invocation is one logged run of the fake CLI.
@@ -62,11 +68,11 @@ func run(args []string) int {
 	start := time.Now().UnixNano()
 	inv := Invocation{Args: args}
 	var positional []string
-	var rawInput string
+	var rawInput, skeleton string
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch a {
-		case "--cli-input-json", "--output", "--region", "--profile", "--cli-binary-format":
+		case "--cli-input-json", "--output", "--region", "--profile", "--cli-binary-format", "--generate-cli-skeleton":
 			if i+1 >= len(args) {
 				fmt.Fprintf(os.Stderr, "argument %s: expected one argument\n", a)
 				return 252
@@ -80,6 +86,8 @@ func run(args []string) int {
 				inv.Region = v
 			case "--profile":
 				inv.Profile = v
+			case "--generate-cli-skeleton":
+				skeleton = v
 			}
 		case "--no-paginate", "--no-cli-pager":
 		default:
@@ -116,6 +124,21 @@ func run(args []string) int {
 	if rule == nil {
 		fmt.Fprintf(os.Stderr, "\naws: error: argument operation: Invalid choice, valid choices are:\n\nfoo | bar\n")
 		code = 252
+	} else if len(positional) > 2 && positional[2] == "help" {
+		if rule.Help == "" || os.Getenv("PAGER") != "cat" || os.Getenv("AWS_PROFILE") != "" {
+			fmt.Fprintln(os.Stderr, "fakeaws: help needs Rule.Help, PAGER=cat and no AWS_PROFILE")
+			code = 255
+		} else {
+			fmt.Print(rule.Help)
+		}
+	} else if skeleton != "" {
+		if rule.Skeleton == nil || skeleton != "input" {
+			fmt.Fprintln(os.Stderr, "fakeaws: no skeleton")
+			code = 255
+		} else {
+			b, _ := json.MarshalIndent(rule.Skeleton, "", "    ")
+			os.Stdout.Write(append(b, '\n'))
+		}
 	} else {
 		if rule.SleepMS > 0 {
 			time.Sleep(time.Duration(rule.SleepMS) * time.Millisecond)

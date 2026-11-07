@@ -166,38 +166,12 @@ func (c *CLI) Call(ctx context.Context, req *Request) (json.RawMessage, error) {
 		args = append(args, outFile)
 	}
 
-	if c.Timeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, c.Timeout)
-		defer cancel()
-	}
-	select {
-	case c.sem <- struct{}{}:
-		defer func() { <-c.sem }()
-	case <-ctx.Done():
-		return nil, apiErr(CodeTimeout, "timed out waiting for a free CLI slot: "+ctx.Err().Error())
-	}
-
-	cmd := exec.CommandContext(ctx, c.Path, args...)
-	cmd.Env = append(os.Environ(), "AWS_PAGER=", "AWS_CLI_AUTO_PROMPT=off")
-	cmd.Env = append(cmd.Env, c.Env...)
-	cmd.WaitDelay = 2 * time.Second
-	stdout := &limitedBuffer{max: c.MaxResponseBytes}
-	var stderr limitedBuffer
-	stderr.max = 64 << 10
-	cmd.Stdout = stdout
-	cmd.Stderr = &stderr
-	runErr := cmd.Run()
-
-	if ctx.Err() != nil {
-		return nil, apiErr(CodeTimeout, "call did not finish in time: "+ctx.Err().Error())
-	}
+	stdout, stderr, runErr := c.run(ctx, args, nil)
 	if runErr != nil {
-		var ee *exec.ExitError
-		if !errors.As(runErr, &ee) {
-			return nil, apiErr(CodeCLI, fmt.Sprintf("cannot run %s: %v", c.Path, runErr))
+		if code, ok := runErr.(localError); ok {
+			return nil, apiErr(code.code, code.msg)
 		}
-		e := ParseCLIError(stderr.String())
+		e := ParseCLIError(stderr)
 		e.Service = req.Service
 		if e.Operation == "" {
 			e.Operation = awsname.PascalOperation(req.Operation)
@@ -220,6 +194,79 @@ func (c *CLI) Call(ctx context.Context, req *Request) (json.RawMessage, error) {
 		return c.attachBody(buf.Bytes(), outFile, bodyMember)
 	}
 	return buf.Bytes(), nil
+}
+
+// localError is a failure of run that did not come from the CLI's own exit
+// status: a timeout or a CLI that could not be started.
+type localError struct{ code, msg string }
+
+func (e localError) Error() string { return e.msg }
+
+// run starts the CLI once with args, bounded by the timeout and the
+// concurrency limit. A non-nil error is either a localError or an
+// *exec.ExitError, in which case stderr holds the CLI's message.
+func (c *CLI) run(ctx context.Context, args, env []string) (*limitedBuffer, string, error) {
+	if c.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.Timeout)
+		defer cancel()
+	}
+	select {
+	case c.sem <- struct{}{}:
+		defer func() { <-c.sem }()
+	case <-ctx.Done():
+		return nil, "", localError{CodeTimeout, "timed out waiting for a free CLI slot: " + ctx.Err().Error()}
+	}
+
+	cmd := exec.CommandContext(ctx, c.Path, args...)
+	cmd.Env = append(os.Environ(), "AWS_PAGER=", "AWS_CLI_AUTO_PROMPT=off")
+	cmd.Env = append(cmd.Env, c.Env...)
+	cmd.Env = withEnv(cmd.Env, env)
+	cmd.WaitDelay = 2 * time.Second
+	stdout := &limitedBuffer{max: c.MaxResponseBytes}
+	var stderr limitedBuffer
+	stderr.max = 64 << 10
+	cmd.Stdout = stdout
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+
+	if ctx.Err() != nil {
+		return nil, "", localError{CodeTimeout, "call did not finish in time: " + ctx.Err().Error()}
+	}
+	if runErr != nil {
+		var ee *exec.ExitError
+		if !errors.As(runErr, &ee) {
+			return nil, "", localError{CodeCLI, fmt.Sprintf("cannot run %s: %v", c.Path, runErr)}
+		}
+		return stdout, stderr.String(), runErr
+	}
+	return stdout, stderr.String(), nil
+}
+
+// withEnv returns base with the KEY=VALUE entries of set applied; an entry
+// with an empty value removes the variable instead of setting it empty.
+func withEnv(base, set []string) []string {
+	if len(set) == 0 {
+		return base
+	}
+	override := map[string]bool{}
+	for _, kv := range set {
+		k, _, _ := strings.Cut(kv, "=")
+		override[k] = true
+	}
+	out := make([]string, 0, len(base)+len(set))
+	for _, kv := range base {
+		k, _, _ := strings.Cut(kv, "=")
+		if !override[k] {
+			out = append(out, kv)
+		}
+	}
+	for _, kv := range set {
+		if k, v, _ := strings.Cut(kv, "="); k != "" && v != "" {
+			out = append(out, kv)
+		}
+	}
+	return out
 }
 
 // attachBody reads a streamed output file into member of the JSON result.

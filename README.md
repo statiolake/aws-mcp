@@ -184,6 +184,44 @@ Every flag has an environment variable default.
 Region and profile resolve as: per-client argument > tool argument > server
 flag > the CLI's own resolution (`AWS_REGION`, `AWS_PROFILE`, config files).
 
+### `describe_aws_operation(service, operation, skeleton_only?, max_length?)`
+
+Shows what an operation takes, straight from the installed AWS CLI, without
+calling AWS or needing credentials:
+
+- the request skeleton from `aws <service> <operation> --generate-cli-skeleton input`
+  (every parameter with a placeholder value of its type, nested structures
+  included), and
+- the CLI's reference page, `aws <service> <operation> help`, trimmed to
+  NAME, DESCRIPTION, OPTIONS, OUTPUT and EXAMPLES (synopsis and global
+  options dropped; `max_length` characters, default 20 000).
+
+The CLI renders help through a pager without checking for a terminal, so the
+server sets `PAGER=cat`/`MANPAGER=cat` and strips groff's bold/underline
+sequences; it also hides the CLI config file for this one command so a
+profile's `cli_help_output = browser` cannot open a browser. On Linux/macOS
+the CLI needs `groff` or `mandoc` to render help; without them the tool still
+returns the skeleton and says why the help is missing.
+
+## No operation lists
+
+Nothing in `aws-mcp` enumerates services or operations, so a service or API
+released tomorrow works as soon as the installed AWS CLI knows it (update the
+CLI to get it):
+
+- names are converted generically: `aws.client("bedrock-agent").list_agents()`
+  and `call_aws("bedrock-agent", "ListAgents")` both run
+  `aws bedrock-agent list-agents` (snake_case / PascalCase → the CLI's
+  kebab-case; only three boto3 names differ from the CLI's: `s3` → `s3api`,
+  `config` → `configservice`, `codedeploy` → `deploy`);
+- read-only mode classifies by verb prefix plus a small allowlist and
+  denylist (below), not by a list of known operations;
+- `describe_aws_operation` reads parameters from the CLI's own model.
+
+A test (`TestUnknownServiceEndToEnd`) drives a made-up `quantum-ledger`
+service through `run_script`, `call_aws` and `describe_aws_operation` down to
+the fake CLI.
+
 ## `aws-rds-mcp`: `rds_query(resource_arn, secret_arn, database, sql, parameters?, region?, profile?)`
 
 Read-only SQL on Aurora / RDS through the
