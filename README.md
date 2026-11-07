@@ -177,15 +177,19 @@ returns up to `limit` (default 10, at most 50) results with title, URL and a
 snippet. It uses the search service behind the docs site's own search box:
 
 ```
-POST https://proxy.search.docs.aws.amazon.com/search?session=<random id>
+POST https://proxy.search.docs.aws.com/search?session=<random id>
 {"textQuery": {"input": "<query>"},
  "contextAttributes": [{"key": "domain", "value": "docs.aws.amazon.com"}],
  "acceptSuggestionBody": "RawText", "locales": ["en_us"]}
 → {"suggestions": [{"textExcerptSuggestion": {"link", "title", "summary", "suggestionBody"}}, ...]}
 ```
 
-This is an undocumented endpoint of the website, not a supported AWS API; if
-AWS changes it, the tool reports the service's answer as an error.
+AWS publishes no documented search API for its documentation. This is the
+endpoint AWS's own documentation MCP server (awslabs
+`aws-documentation-mcp-server`) calls, so it is the one AWS itself keeps
+working for tools; it moved once already (from
+`proxy.search.docs.aws.amazon.com`, which no longer resolves). If it moves
+again the tool reports the failure as an error.
 
 ### `read_aws_docs(url, start_index?, max_length?)`
 
@@ -321,8 +325,8 @@ aws.client("s3").get_object(Bucket="my-bucket", Key="config.json")["Body"]
   event-stream operations are not supported.
 - Requires AWS CLI **v2**.
 - The documentation tools need HTTPS access to `docs.aws.amazon.com` and
-  `proxy.search.docs.aws.amazon.com`; the search endpoint is the website's,
-  not a documented API.
+  `proxy.search.docs.aws.com` (the endpoint AWS's documentation MCP server
+  uses; AWS documents no search API).
 
 ## Development
 

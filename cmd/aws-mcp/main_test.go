@@ -293,7 +293,7 @@ func TestDocsTools(t *testing.T) {
 	long := strings.Repeat("<p>Lorem ipsum dolor sit amet.</p>\n", 400)
 	docs := awsdocs.New(awsdocs.Options{HTTP: &http.Client{Transport: fakeTransport{func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.URL.Host == "proxy.search.docs.aws.amazon.com":
+		case r.URL.Host == "proxy.search.docs.aws.com":
 			io.WriteString(w, `{"suggestions":[{"textExcerptSuggestion":{"link":"https://docs.aws.amazon.com/w/latest/ug/what-is.html","title":"What is Widgets?","summary":"Widgets hold parts."}}]}`)
 		case r.URL.Path == "/w/latest/ug/what-is.html":
 			w.Header().Set("Content-Type", "text/html")

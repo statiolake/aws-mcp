@@ -84,7 +84,7 @@ func newTestClient(t *testing.T, h http.HandlerFunc) *Client {
 func TestSearch(t *testing.T) {
 	var got map[string]any
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Host != "proxy.search.docs.aws.amazon.com" || r.URL.Path != "/search" || r.URL.Query().Get("session") == "" {
+		if r.Method != http.MethodPost || r.URL.Host != "proxy.search.docs.aws.com" || r.URL.Path != "/search" || r.URL.Query().Get("session") == "" {
 			t.Errorf("request %s %s", r.Method, r.URL)
 		}
 		b, _ := io.ReadAll(r.Body)

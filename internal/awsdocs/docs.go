@@ -25,9 +25,11 @@ import (
 // DocsHost is the only host Read fetches from.
 const DocsHost = "docs.aws.amazon.com"
 
-// DefaultSearchURL is the search service behind the search box of
-// docs.aws.amazon.com.
-const DefaultSearchURL = "https://proxy.search.docs.aws.amazon.com/search"
+// DefaultSearchURL is the search service behind docs.aws.amazon.com's search
+// box, the one AWS's own documentation MCP server calls. AWS documents no
+// search API; the earlier host proxy.search.docs.aws.amazon.com no longer
+// resolves.
+const DefaultSearchURL = "https://proxy.search.docs.aws.com/search"
 
 // Options configure a Client; zero fields take their defaults.
 type Options struct {
